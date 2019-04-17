@@ -8,12 +8,59 @@ servers=$1
 # operate type
 opt_type=$2
 
+config_file="/etc/spctl/spctl.conf"
+# 当前主机用户
+opt_user=""
+# 待被操作主机的用户
+dst_user=""
+
+function get_config() {
+    local config_path=$1
+    local config_name=$2
+    sed -n 's/^[[:space:]]*'$config_name'[[:space:]]*=[[:space:]]*\(.*[^[:space:]]\)\([[:space:]]*\)$/\1/p' $config_path
+}
+
+function set_config() {
+    local config_path=$1
+    local config_name=$2
+    local config_value=$3
+    sed -i 's/^[[:space:]]*'$config_name'[[:space:]]*=.*/'$config_name'='$config_value'/g' $config_path
+}
+
+# 获取当前机器的操作用户
+opt_user=`get_config ${config_file} user`
+# 获取目标主机的用户
+dst_user=`get_config ${config_file} dst_user`
+
+if [ ! -n "${dst_user}" ];then
+    echo "没有配置默认待操作用户, 使用作目标主机用户: root"
+    dst_user="root"
+fi
+current_user=`whoami`
+
+if [ ! -n "${opt_user}" ];then
+    echo "未配置当前默认操作用户, 使用当前用户: ${current_user}"
+elif [ "$current_user" != "$opt_user" ];then
+    echo "当前用户${current_user}与默认操作用户${opt_user}不匹配, 不能操作，请检查配置"
+    exit 1
+fi
+
+ssh_keygen_at_dst(){
+    password=$1
+    for host_ip in $(cat ${servers})
+    do
+        sshpass -p ${password} ssh ${dst_user}@${host_ip} "ssh-keygen -t rsa -N '' -f ~/.ssh/id_rsa" &
+    done
+    wait
+}
+
 copy_ssh_key(){
     password=$1
     for host_ip in $(cat ${servers})
     do
-        sshpass -p ${password} ssh-copy-id -i ~/.ssh/id_rsa.pub root@${host_ip} -o "StrictHostKeyChecking no"
+        sshpass -p ${password} ssh-copy-id -i ~/.ssh/id_rsa.pub   ${dst_user}@${host_ip} -o "StrictHostKeyChecking no" &
     done
+    wait
 }
 
 # send file or directory to all servers
@@ -22,9 +69,9 @@ scp_files(){
     dst=$2
     for i in $(cat ${servers}); do
         if [ -d ${src} ]; then
-            scp -r ${src} root@${i}:$dst &
+            scp -r ${src} ${dst_user}@${i}:$dst &
         else
-            scp ${src} root@${i}:$dst &
+            scp ${src} ${dst_user}@${i}:$dst &
         fi
     done
     wait
@@ -34,7 +81,7 @@ scp_files(){
 exec_cmd(){
     for i in $(cat ${servers}); do
         cmd="$1 && echo \"[$i] completed -> [$1]---------------------------------------\""
-        ssh root@$i "${cmd}" &
+        ssh ${dst_user}@$i "${cmd}" &
     done
     wait
 }
@@ -45,11 +92,13 @@ run_script(){
     exec_cmd "chmod +x /tmp/$tmp_name && sh /tmp/$tmp_name"
 }
 usage(){
+    _cmd="spctl"
     echo "Usage:"
-    echo "-cp:      $0 servers.txt -cp src-file dst-file"
-    echo "-c:       $0 servers.txt -c [cmd]"
-    echo "-s:       $0 servers.txt -s [script.sh]"
-    echo "-ssh:     $0 servers.txt -ssh [password]" 
+    echo "-cp:      ${_cmd} servers.txt -cp src-file dst-file"
+    echo "-c:       ${_cmd} servers.txt -c [cmd]"
+    echo "-s:       ${_cmd} servers.txt -s [script.sh]"
+    echo "-ssh:     ${_cmd} servers.txt -ssh [password]"
+    echo "-ssh-gen  ${_cmd} servers.txt -ssh-gen [password]"
 }
 
 
@@ -91,5 +140,19 @@ case $opt_type in
         else
             copy_ssh_key "$3"
         fi
+        ;;
+    -ssh-gen)
+        if [ ! -n "$3" ]; then
+            echo "please input password"
+            usage
+            exit 1
+        else
+            ssh_keygen_at_dst "$3"
+        fi
+        ;;
+    *)
+        echo "error input"
+        usage
+        exit 1
         ;;
 esac
